@@ -86,21 +86,35 @@ function App() {
           )}
           <br />
           {submitted && q.type === "mcq" && (
-            <p>✅ Correct answer: {q.answer}</p>
+            <p>
+              {answers[i] === q.answer ? "✅" : "❌"} Correct answer: {q.answer}
+            </p>
           )}
           {submitted && q.type === "qa" && (
-            <p>🧠 Score: {qaScores.find(s => s.question === q.question)?.score || "Pending"}/10</p>
+            <p>Score: {qaScores.find(s => s.question === q.question)?.score || "Pending"}/10</p>
           )}
         </div>
       ))}
       {questions.length > 0 && !submitted && (
         <button onClick={handleSubmit}>Submit Answers</button>
       )}
-      {submitted && (
-        <div>
-          <h3>MCQ Score: {mcqScore} / {totalMcq}</h3>
-        </div>
-      )}
+      {submitted && totalMcq > 0 && (
+  <div>
+    <h3>MCQ Score: {mcqScore} / {totalMcq}</h3>
+  </div>
+)}
+
+{submitted && qaScores.length > 0 && (
+  <div>
+    <h3>Total Score: {
+      (
+        qaScores.reduce((acc, q) => acc + parseFloat(q.score || 0), 0) 
+        / qaScores.length
+      ).toFixed(1)
+    } / 10</h3>
+  </div>
+)}
+
     </div>
   );
 }
