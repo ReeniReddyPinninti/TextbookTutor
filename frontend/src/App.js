@@ -7,20 +7,31 @@ function App() {
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [qaScores, setQaScores] = useState([]);
+  const [uploadComplete, setUploadComplete] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const uploadPDF = async () => {
     const formData = new FormData();
     formData.append("file", file);
+    setUploadComplete(false);
     await axios.post("http://localhost:8000/upload-pdf", formData);
-  };
+    setUploadComplete(true);
+  };  
 
   const generate = async (type) => {
-    const res = await axios.get(`http://localhost:8000/generate-questions?n=5&qtype=${type}`);
+    const count = window.prompt("Enter number of questions to generate:", "5");
+    if (!count || isNaN(count) || count <= 0) return;
+  
+    setLoading(true);
+    setUploadComplete(false);
+  
+    const res = await axios.get(`http://localhost:8000/generate-questions?n=${count}&qtype=${type}`);
     setQuestions(res.data);
     setSubmitted(false);
     setAnswers({});
     setQaScores([]);
-  };
+    setLoading(false);
+  };  
 
   const handleChange = (idx, val) => {
     setAnswers({ ...answers, [idx]: val });
@@ -57,6 +68,8 @@ function App() {
       <button onClick={uploadPDF}>Upload</button>
       <button onClick={() => generate("mcq")}>Generate MCQs</button>
       <button onClick={() => generate("qa")}>Generate Q&A</button>
+      {uploadComplete && <p style={{ color: "green" }}>✅ Upload complete!</p>}
+      {loading && <p>Loading questions...</p>}
 
       <hr />
       {questions.map((q, i) => (
