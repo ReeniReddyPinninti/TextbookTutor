@@ -1,16 +1,15 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Query
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict
 import fitz  # PyMuPDF
 import os
 import faiss
 import numpy as np
 import subprocess
 from sentence_transformers import SentenceTransformer
-
-app = FastAPI()
 from fastapi.middleware.cors import CORSMiddleware
 
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -20,13 +19,16 @@ app.add_middleware(
 )
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
-index = None
-chunks_store = []
+pdf_store: Dict[str, Dict] = {}  # {filename: {"chunks": [...], "index": faiss.Index}}
 
 class QAItem(BaseModel):
     question: str
     context: str
     user_answer: str
+
+class FAQRequest(BaseModel):
+    filename: str
+    question: str
 
 def query_llm(prompt):
     result = subprocess.run(["ollama", "run", "mistral", prompt], capture_output=True, text=True)
@@ -39,30 +41,43 @@ def pdf_to_chunks(file_path, chunk_size=500):
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    global index, chunks_store
     contents = await file.read()
     path = f"tmp/{file.filename}"
     os.makedirs("tmp", exist_ok=True)
     with open(path, "wb") as f:
         f.write(contents)
 
-    chunks_store = pdf_to_chunks(path)
-    embeddings = model.encode(chunks_store)
+    chunks = pdf_to_chunks(path)
+    embeddings = model.encode(chunks)
     dim = embeddings[0].shape[0]
     index = faiss.IndexFlatL2(dim)
     index.add(np.array(embeddings))
-    return {"chunks": len(chunks_store)}
+
+    pdf_store[file.filename] = {
+        "chunks": chunks,
+        "index": index,
+        "embeddings": embeddings
+    }
+
+    return {"filename": file.filename, "chunks": len(chunks)}
+
+@app.get("/list-pdfs")
+def list_pdfs():
+    return {"pdfs": list(pdf_store.keys())}
 
 @app.get("/generate-questions")
-def generate_questions(n: int, qtype: str):
-    import random
-    selected_chunks = chunks_store[:n]
+def generate_questions(n: int, qtype: str, filename: str = Query(...)):
+    if filename not in pdf_store:
+        return {"error": "PDF not found."}
+
+    chunks = pdf_store[filename]["chunks"]
+    selected_chunks = chunks[:n]
     questions = []
 
-    for i, chunk in enumerate(selected_chunks):
+    for chunk in selected_chunks:
         if qtype == "mcq":
             prompt = (
-                f"Based on the following text, generate ONE multiple choice question.\n"
+                f"Based on the following text, generate ONE multiple choice question with only ONE correct answer (no 'Select all that apply').\n"
                 f"Text:\n\"{chunk}\"\n\n"
                 f"Format your response exactly like this:\n"
                 f"Question: <your question here>\n"
@@ -73,23 +88,20 @@ def generate_questions(n: int, qtype: str):
                 f"Answer: <A/B/C/D>\n"
             )
             response = query_llm(prompt)
-            try:
-                import re
-                q_match = re.search(r"Question:\s*(.+)", response)
-                a_match = re.findall(r"[A-D]\.\s*(.+)", response)
-                ans_match = re.search(r"Answer:\s*([A-D])", response)
+            import re
+            q_match = re.search(r"Question:\s*(.+)", response)
+            a_match = re.findall(r"[A-D]\.\s*(.+)", response)
+            ans_match = re.search(r"Answer:\s*([A-D])", response)
 
-                if q_match and len(a_match) == 4 and ans_match:
-                    answer_index = ord(ans_match.group(1)) - 65
-                    questions.append({
-                        "type": "mcq",
-                        "question": q_match.group(1),
-                        "options": a_match,
-                        "answer": a_match[answer_index]
-                    })
-                else:
-                    raise ValueError("LLM output format incorrect")
-            except:
+            if q_match and len(a_match) == 4 and ans_match:
+                answer_index = ord(ans_match.group(1)) - 65
+                questions.append({
+                    "type": "mcq",
+                    "question": q_match.group(1),
+                    "options": a_match,
+                    "answer": a_match[answer_index]
+                })
+            else:
                 questions.append({
                     "type": "mcq",
                     "question": "Invalid LLM response",
@@ -123,6 +135,20 @@ def evaluate_qa(qa_list: List[QAItem]):
         score = query_llm(prompt)
         results.append({"question": item.question, "score": score})
     return {"results": results}
+
+@app.post("/ask-faq")
+def ask_faq(data: FAQRequest):
+    if data.filename not in pdf_store:
+        return {"answer": "PDF not found"}
+
+    chunks = pdf_store[data.filename]["chunks"]
+    embeddings = model.encode([data.question])
+    D, I = pdf_store[data.filename]["index"].search(np.array(embeddings), 1)
+    context = chunks[I[0][0]]
+
+    prompt = f"Context: {context}\n\nQuestion: {data.question}\nAnswer:"
+    answer = query_llm(prompt)
+    return {"answer": answer}
 
 if __name__ == "__main__":
     import uvicorn
