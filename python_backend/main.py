@@ -8,6 +8,13 @@ import numpy as np
 import subprocess
 from sentence_transformers import SentenceTransformer
 from fastapi.middleware.cors import CORSMiddleware
+import pyttsx3
+import uuid
+from vosk import Model, KaldiRecognizer
+import wave
+import json
+from fastapi.responses import FileResponse
+import subprocess
 
 app = FastAPI()
 app.add_middleware(
@@ -38,6 +45,33 @@ def pdf_to_chunks(file_path, chunk_size=500):
     doc = fitz.open(file_path)
     text = " ".join(page.get_text() for page in doc)
     return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+# Initialize Vosk model once globally
+vosk_model = Model("/Users/reenipinninti/Documents/TextbookTutor/python_backend/vosk-model-small-en-us-0.15")
+
+def text_to_speech(text: str, filename_prefix="tts_output"):
+    engine = pyttsx3.init()
+    filename = f"tmp/{filename_prefix}_{uuid.uuid4().hex}.mp3"
+    os.makedirs("tmp", exist_ok=True)
+    engine.save_to_file(text, filename)
+    engine.runAndWait()
+    return filename
+
+def speech_to_text(audio_file_path):
+    wf = wave.open(audio_file_path, "rb")
+    rec = KaldiRecognizer(vosk_model, wf.getframerate())
+
+    results = []
+    while True:
+        data = wf.readframes(4000)
+        if len(data) == 0:
+            break
+        if rec.AcceptWaveform(data):
+            res = json.loads(rec.Result())
+            results.append(res.get("text", ""))
+    res = json.loads(rec.FinalResult())
+    results.append(res.get("text", ""))
+    return " ".join(results).strip()
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -149,6 +183,45 @@ def ask_faq(data: FAQRequest):
     prompt = f"Context: {context}\n\nQuestion: {data.question}\nAnswer:"
     answer = query_llm(prompt)
     return {"answer": answer}
+
+@app.get("/tts")
+def tts(text: str):
+    audio_file = text_to_speech(text)
+    return FileResponse(audio_file, media_type="audio/mpeg")
+
+@app.post("/stt")
+async def stt(file: UploadFile = File(...), filename: str = Query(...)):
+    os.makedirs("tmp", exist_ok=True)
+    webm_path = f"tmp/{file.filename}"
+    wav_path = f"tmp/{uuid.uuid4().hex}.wav"
+
+    contents = await file.read()
+    with open(webm_path, "wb") as f:
+        f.write(contents)
+
+    subprocess.run([
+        "ffmpeg", "-i", webm_path,
+        "-ar", "16000", "-ac", "1",
+        wav_path
+    ], check=True)
+
+    question = speech_to_text(wav_path)
+
+    if filename not in pdf_store:
+        return {"error": "PDF not found", "question": question, "answer": ""}
+
+    chunks = pdf_store[filename]["chunks"]
+    embeddings = model.encode([question])
+    D, I = pdf_store[filename]["index"].search(np.array(embeddings), 1)
+    context = chunks[I[0][0]]
+
+    prompt = f"Context: {context}\n\nQuestion: {question}\nAnswer:"
+    answer = query_llm(prompt)
+
+    return {
+        "question": question,
+        "answer": answer
+    }
 
 if __name__ == "__main__":
     import uvicorn
