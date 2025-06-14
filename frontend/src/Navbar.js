@@ -5,6 +5,7 @@ function Navbar({ username, setUsername }) {
   const logout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("username");
+    window.location.reload();
     setUsername(null);
   };
 

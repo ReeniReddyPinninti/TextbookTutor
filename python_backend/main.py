@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Query, Form
 from pydantic import BaseModel
 from typing import List, Dict
 import fitz  # PyMuPDF
@@ -15,6 +15,11 @@ import wave
 import json
 from fastapi.responses import FileResponse
 import subprocess
+from pymongo import MongoClient
+
+client = MongoClient("mongodb://localhost:27017")
+db = client["rag_app"]
+pdf_collection = db["pdfs"]
 
 app = FastAPI()
 app.add_middleware(
@@ -73,11 +78,33 @@ def speech_to_text(audio_file_path):
     results.append(res.get("text", ""))
     return " ".join(results).strip()
 
+def ensure_pdf_loaded(filename, email):
+    if filename in pdf_store:
+        return True
+
+    doc = pdf_collection.find_one({"filename": filename, "email": email})
+    if not doc:
+        return False
+
+    chunks = doc["chunks"]
+    embeddings = model.encode(chunks)
+    dim = embeddings[0].shape[0]
+    index = faiss.IndexFlatL2(dim)
+    index.add(np.array(embeddings))
+
+    pdf_store[filename] = {
+        "chunks": chunks,
+        "index": index,
+        "embeddings": embeddings
+    }
+    return True
+
 @app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(file: UploadFile = File(...), email: str = Form(...)):
     contents = await file.read()
     path = f"tmp/{file.filename}"
     os.makedirs("tmp", exist_ok=True)
+
     with open(path, "wb") as f:
         f.write(contents)
 
@@ -87,17 +114,29 @@ async def upload_pdf(file: UploadFile = File(...)):
     index = faiss.IndexFlatL2(dim)
     index.add(np.array(embeddings))
 
+    # Always store in memory (for session use)
     pdf_store[file.filename] = {
         "chunks": chunks,
         "index": index,
         "embeddings": embeddings
     }
 
+    # Only save to MongoDB if it's a logged-in user
+    if email != "guest":
+        pdf_collection.replace_one(
+            {"filename": file.filename, "email": email},
+            {"filename": file.filename, "email": email, "chunks": chunks},
+            upsert=True
+        )
+
     return {"filename": file.filename, "chunks": len(chunks)}
 
 @app.get("/list-pdfs")
-def list_pdfs():
-    return {"pdfs": list(pdf_store.keys())}
+def list_pdfs(email: str = Query(None)):
+    if not email or email == "guest":
+        return {"pdfs": []}
+    user_pdfs = list(pdf_collection.find({"email": email}, {"_id": 0, "filename": 1}))
+    return {"pdfs": [item["filename"] for item in user_pdfs]}
 
 @app.get("/generate-questions")
 def generate_questions(n: int, qtype: str, filename: str = Query(...)):

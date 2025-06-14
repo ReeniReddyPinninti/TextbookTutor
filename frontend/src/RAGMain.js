@@ -15,18 +15,21 @@ function RAGMain() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const [audioUrl, setAudioUrl] = useState(null);
+  const username = localStorage.getItem("username");
 
   useEffect(() => {
-    axios.get("http://localhost:8000/list-pdfs").then(res => {
+    if (!username) return;
+    axios.get(`http://localhost:8000/list-pdfs?email=${username}`).then(res => {
       setPdfs(res.data.pdfs);
     });
-  }, []);
+  }, [username]);  
 
   const uploadPDF = async () => {
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("email", username);
     await axios.post("http://localhost:8000/upload-pdf", formData);
-    const res = await axios.get("http://localhost:8000/list-pdfs");
+    const res = await axios.get(`http://localhost:8000/list-pdfs?email=${username}`);
     setPdfs(res.data.pdfs);
   };
 
